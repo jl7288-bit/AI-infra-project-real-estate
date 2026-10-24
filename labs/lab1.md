@@ -1,6 +1,6 @@
 # Lab 1
 
-**Name:**
+**Name:**Jiayi (Annie) Liu
 **Due:** Sunday, October 25 at 11:59 PM
 **Submit:** your repo URL in the Lab 1 assignment on CourseWorks
 
