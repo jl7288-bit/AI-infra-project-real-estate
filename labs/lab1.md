@@ -16,17 +16,18 @@
 
 In class we named five stages every data system has. Trace them for the two tables you loaded at home. Some rows ask what you did this week; the last two ask you to look ahead to the system you'll build by December. Educated guesses are fine; say where you're unsure.
 
-**My tables:** (main table) + (second table)
+**My tables:** PLUTO (Manhattan parcels) + ZAP BBL (Manhattan project-parcel records)
 
 | Stage | For your data | Your answer |
 |---|---|---|
-| **1. Ingestion** | Where did each file come from, and how did you get it (portal download, export, API)? If the source changed its format tomorrow, what would break? | |
-| **2. Validation** | What did `DESCRIBE`, `SUMMARIZE` and the key check reveal? Name one check you'd want to run *every time* new data arrives. | |
-| **3. Transformation** | What did you change to make the data usable (e.g. the missing-value fix)? What would you still need to clean, join or calculate to answer your question? | |
-| **4. Scheduling** | How often does the source publish updates (check its website)? If your app used this data, how often would it need to refresh to stay useful, and why? | |
-| **5. Interface** | Who would want answers from this data? Write the plain-English question they'd ask, and what a good answer would show them. | |
+| **1. Ingestion** | Where did each file come from, and how did you get it (portal download, export, API)? If the source changed its format tomorrow, what would break? |Both datasets came from NYC Open Data. The Manhattan extracts were downloaded as CSV files through the API. I uploaded these files to my project's data folder and loaded them into DuckDB.Changes to column names, file formats, or BBL formatting could break the import or matching queries. |
+| **2. Validation** | What did `DESCRIBE`, `SUMMARIZE` and the key check reveal? Name one check you'd want to run *every time* new data arrives. |DESCRIBE showed that PLUTO's BBL loaded as DOUBLE, while ZAP's BBL loaded as BIGINT. The quality checks found 863 missing BBLs in ZAP, and the key comparison found 4,514 distinct non-null ZAP BBLs without a match in PLUTO. Whenever new data arrives, I would check missing BBLs, duplicate keys in PLUTO, and the matching rate between the tables. |
+| **3. Transformation** | What did you change to make the data usable (e.g. the missing-value fix)? What would you still need to clean, join or calculate to answer your question? |I standardized BBL formatting in my comparison queries and excluded NULL keys from the key counts without deleting the original records. Next, I would join ZAP to project details using project_id to identify application types, dates, and outcomes, then connect those records to PLUTO by BBL. I would also investigate unmatched identifiers and add ownership and spatial data to assess redevelopment and adjacent-site opportunities. |
+| **4. Scheduling** | How often does the source publish updates (check its website)? If your app used this data, how often would it need to refresh to stay useful, and why? |The source metadata lists quarterly updates for PLUTO and monthly updates for ZAP BBL. I also plan to add DOB NOW permit data to track construction activity. My future app would check for new releases daily and refresh each dataset when updates are available. This would help identify new applications or construction activity that could affect a property's redevelopment potential. |
+| **5. Interface** | Who would want answers from this data? Write the plain-English question they'd ask, and what a good answer would show them. | Investors and developers could ask: “Which properties in Manhattan may offer investment and redevelopment potential through rezoning, building expansion, or combining adjacent sites, especially those without matching recorded applications?” A useful answer would show a map and a shortlist with parcel size, built FAR, zoning, application history, and data limitations.And also what potentia development opportunity can it bring and the implication on the development strategy and the potential revenue. It should clearly distinguish potential opportunities from confirmed development rights.|
 
 **Which stage feels most fragile for your data, and why?** (two or three sentences)
+Validation feels most fragile because missing or unmatched BBLs could make a property appear to have no application history when a relevant record actually exists. In my extract, 863 ZAP records lack BBLs and 4,514 distinct non-null ZAP BBLs do not match PLUTO. These gaps need investigation before I use the results to identify overlooked redevelopment opportunities.
 
 ---
 
