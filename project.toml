@@ -1,0 +1,196 @@
+# =============================================================================
+#  project.toml · YOUR PROJECT SETTINGS
+#  This is the only file you edit. pipeline.py reads it and does the rest.
+#
+#  Rules of the format:
+#   - Text goes in "double quotes". Lists go in [square brackets].
+#   - Lines starting with # are notes for people; the computer ignores them.
+#   - SQL that spans several lines goes between triple quotes: """ ... """
+#
+#  This example: NYC 311 heat and hot water complaints from the last 7 days.
+#  To see any API's columns before filling this in, run:  python pipeline.py --preview
+# =============================================================================
+
+[project]
+name = "manhattan_redevelopment"      # a short name: lowercase, no spaces
+
+
+# -----------------------------------------------------------------------------
+# 1. SOURCE: where the data comes from
+# -----------------------------------------------------------------------------
+[source]
+type = "socrata"                # "socrata" for NYC Open Data and most city portals,
+                                # "worldbank" for the World Bank (see examples/)
+
+# The API address: on the dataset's page, click Export (or API) and copy the
+# "API Endpoint" ending in .json
+url = "https://data.cityofnewyork.us/resource/64uk-42ks.json"
+
+# The columns to keep (use the names that --preview shows you)
+columns = ["bbl", "borough", "address", "landuse", "zonedist1", "lotarea", "bldgarea", "builtfar", "residfar", "commfar", "facilfar", "landmark", "histdist", "version"]
+# Optional: only some rows. Leave as "" to take everything.
+filter = "borough = 'MN'"
+
+# Optional: only recent rows. Remove these two lines to take all dates.
+ 
+
+max_rows = 100000              # a safety limit on how many rows to fetch
+
+
+# -----------------------------------------------------------------------------
+# 2. CHECKS: the rules that define "ready" (at least five)
+#    The data arrives in a table called raw.
+#    Each check is SQL that COUNTS PROBLEM ROWS. 0 problems = PASS.
+#    If any check fails, the run stops and nothing is published.
+# -----------------------------------------------------------------------------
+[[checks]]
+name = "snapshot size is plausible and below the download cap"
+why = "The earlier Manhattan extract had 42504 rows; a small download or a reached cap needs investigation."
+sql = "SELECT CASE WHEN count(*) >= 30000 AND count(*) < 100000 THEN 0 ELSE 1 END FROM raw"
+
+[[checks]]
+name = "BBLs are present, integral and in the Manhattan numeric range"
+why = "Missing or malformed identifiers can produce false unmatched parcels in later joins."
+sql = "WITH ids AS (SELECT TRY_CAST(bbl AS DECIMAL(20,8)) AS id FROM raw) SELECT count(*) FROM ids WHERE id IS NULL OR id < 1000000000 OR id >= 2000000000 OR id <> floor(id)"
+ 
+[[checks]]
+name = "normalized BBLs are unique"
+why = "The clean snapshot must contain one row per tax lot; duplicates would inflate counts."
+sql = "SELECT count(*) - count(DISTINCT TRY_CAST(bbl AS BIGINT)) FROM raw"
+ 
+
+[[checks]]
+name = "all records are Manhattan records"
+why = "Other boroughs would distort a Manhattan-only analysis."
+sql = "SELECT count(*) FROM raw WHERE borough IS NULL OR borough <> 'MN'"
+
+[[checks]]
+name = "nonmissing lot areas are numeric and nonnegative"
+why = "Invalid lot areas make size rankings unreliable; missing areas remain unknown."
+sql = "SELECT count(*) FROM raw WHERE lotarea IS NOT NULL AND (TRY_CAST(lotarea AS DOUBLE) IS NULL OR NOT isfinite(TRY_CAST(lotarea AS DOUBLE)) OR TRY_CAST(lotarea AS DOUBLE) < 0)"
+
+[[checks]]
+name = "nonmissing built FAR values are numeric and nonnegative"
+why = "Invalid FAR values could incorrectly qualify a parcel for the low-density screen."
+sql = "SELECT count(*) FROM raw WHERE builtfar IS NOT NULL AND (TRY_CAST(builtfar AS DOUBLE) IS NULL OR NOT isfinite(TRY_CAST(builtfar AS DOUBLE)) OR TRY_CAST(builtfar AS DOUBLE) < 0)"
+
+[[checks]]
+name = "one nonempty source version per snapshot"
+why = "Mixed or unidentified releases would make comparisons and provenance unclear."
+sql = "SELECT CASE WHEN count(DISTINCT version) = 1 AND count(*) FILTER (WHERE version IS NULL OR trim(version) = '') = 0 THEN 0 ELSE 1 END FROM raw"
+
+# -----------------------------------------------------------------------------
+# 3. TABLES: what to build and publish to MotherDuck (at least three)
+#    Each is a SELECT on raw, or on a table listed above it.
+#    Start with one clean table, then build analysis tables from it:
+#    a trend over time, a summary of key metrics, and a ranking.
+#    Next week's AI app answers questions from these tables.
+# -----------------------------------------------------------------------------
+
+[[tables]]
+name = "manhattan_parcels_clean"
+sql = """
+SELECT CAST(CAST(bbl AS BIGINT) AS VARCHAR) AS bbl, borough,
+    NULLIF(trim(address), '') AS address, TRY_CAST(landuse AS INTEGER) AS landuse,
+    NULLIF(upper(trim(zonedist1)), '') AS zonedist1,
+    TRY_CAST(lotarea AS DOUBLE) AS lotarea, TRY_CAST(bldgarea AS DOUBLE) AS bldgarea,
+    TRY_CAST(builtfar AS DOUBLE) AS builtfar, TRY_CAST(residfar AS DOUBLE) AS residfar,
+    TRY_CAST(commfar AS DOUBLE) AS commfar, TRY_CAST(facilfar AS DOUBLE) AS facilfar,
+    NULLIF(trim(landmark), '') AS landmark, NULLIF(trim(histdist), '') AS histdist,
+    version, current_timestamp AS retrieved_at
+FROM raw
+"""
+[[tables]]
+name = "manhattan_far_comparison"
+sql = """
+WITH scenarios AS (
+    SELECT p.*, s.use_type, s.reference_far FROM manhattan_parcels_clean p
+    CROSS JOIN LATERAL (VALUES ('residential', p.residfar),
+        ('commercial', p.commfar), ('community_facility', p.facilfar)) s(use_type, reference_far)
+), gaps AS (
+    SELECT *, CASE WHEN isfinite(reference_far) AND reference_far > 0
+        AND isfinite(builtfar) AND builtfar >= 0
+        THEN reference_far - builtfar END AS far_gap FROM scenarios
+)
+SELECT *, CASE WHEN isfinite(lotarea) AND lotarea > 0 AND far_gap > 0
+    THEN far_gap * lotarea END AS positive_gap_area_proxy_sqft FROM gaps
+"""
+[[tables]]
+name = "manhattan_far_summary"
+sql = """
+SELECT zonedist1, use_type, version, count(*) AS parcel_count,
+    count(far_gap) AS comparable_parcels,
+    count(*) - count(far_gap) AS not_comparable_parcels,
+    count(*) FILTER (WHERE far_gap > 0) AS positive_gap_parcels,
+    round(avg(far_gap), 3) AS avg_far_gap,
+    count(positive_gap_area_proxy_sqft) AS parcels_with_positive_area_proxy,
+    round(sum(positive_gap_area_proxy_sqft), 2) AS positive_gap_area_proxy_sqft
+FROM manhattan_far_comparison GROUP BY zonedist1, use_type, version
+"""
+[[tables]]
+name = "manhattan_far_ranking"
+sql = """
+SELECT row_number() OVER (PARTITION BY use_type, version
+    ORDER BY positive_gap_area_proxy_sqft DESC NULLS LAST, far_gap DESC, bbl) AS screening_rank,
+    bbl, address, landuse, zonedist1, use_type, lotarea, builtfar, reference_far,
+    far_gap, positive_gap_area_proxy_sqft, landmark, histdist, version, retrieved_at
+FROM manhattan_far_comparison WHERE far_gap > 0
+"""
+[[report]]
+question = "How many parcels are in the clean snapshot?"
+sql = "SELECT version, count(*) AS parcels FROM manhattan_parcels_clean GROUP BY version"
+[[report]]
+question = "How many parcels have comparable or positive FAR differences within each use scenario?"
+sql = "SELECT use_type, version, sum(parcel_count) AS parcels, sum(comparable_parcels) AS comparable_parcels, sum(not_comparable_parcels) AS not_comparable_parcels, sum(positive_gap_parcels) AS positive_gap_parcels FROM manhattan_far_summary GROUP BY use_type, version ORDER BY version, use_type"
+[[report]]
+question = "Which three parcels rank highest within each use scenario by the area proxy?"
+sql = "SELECT use_type, screening_rank, bbl, address, zonedist1, far_gap, positive_gap_area_proxy_sqft FROM manhattan_far_ranking WHERE screening_rank <= 3 ORDER BY screening_rank, use_type"
+
+
+# -----------------------------------------------------------------------------
+# 4. REPORT (optional): questions the pipeline answers at the end of each run
+#    Each is a plain-English question and the SQL that answers it, using the
+#    tables above. The answers print in the run log. Try your findings here!
+# -----------------------------------------------------------------------------
+[[report]]
+question = "How many Manhattan parcels are in this snapshot?"
+sql = """
+SELECT version, COUNT(*) AS parcel_count
+FROM manhattan_parcels_clean
+GROUP BY version
+"""
+
+[[report]]
+question = "How many parcels have a positive FAR gap under each use scenario?"
+sql = """
+SELECT
+    use_type,
+    version,
+    SUM(parcel_count) AS total_parcels,
+    SUM(comparable_parcels) AS comparable_parcels,
+    SUM(not_comparable_parcels) AS not_comparable_parcels,
+    SUM(positive_gap_parcels) AS positive_gap_parcels
+FROM manhattan_far_summary
+GROUP BY use_type, version
+ORDER BY version, use_type
+"""
+
+[[report]]
+question = "Which three parcels rank highest within each use scenario by the area proxy?"
+sql = """
+SELECT
+    use_type,
+    screening_rank,
+    bbl,
+    address,
+    zonedist1,
+    builtfar,
+    reference_far,
+    far_gap,
+    positive_gap_area_proxy_sqft
+FROM manhattan_far_ranking
+WHERE screening_rank <= 3
+ORDER BY use_type, screening_rank
+"""
+ 
+
